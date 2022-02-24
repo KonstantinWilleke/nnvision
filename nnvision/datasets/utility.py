@@ -113,7 +113,6 @@ class ImageCache:
         filename_precision: - amount leading zeros of the files in the specified folder
         """
         
-        self.cache = {}
         self.path = path
         self.subsample = subsample
         self.crop = crop
@@ -124,6 +123,12 @@ class ImageCache:
         self.normalize = normalize
         self.leading_zeros = filename_precision
 
+        self.n_images = len(self)
+        self.cache_counter = 0
+        self.img_dim = self.get_transformed_size()
+        self.cache_lookup = np.zeros((self.n_images, ), dtype=bool)
+        self.cache = torch.zeros(self.n_images, *self.img_dim[-2:], dtype=torch.float).cuda()
+
     def __len__(self):
         return len([file for file in os.listdir(self.path) if file.endswith('.npy')])
 
@@ -131,20 +136,38 @@ class ImageCache:
         return key in self.cache
 
     def __getitem__(self, item):
-        item = item.tolist() if isinstance(item, Iterable) else item
-        return [self[i] for i in item] if isinstance(item, Iterable) else self.update(item)
+        #img = torch.zeros(len(item), self.img_dim)
+        if self.cache_counter < self.n_images:
+            self.update(item)
+
+        return self.cache[item]
+
+    def load_sample(self):
+        for file in os.listdir(self.path):
+            if file.endswith(".npy"):
+                filename = os.path.join(self.path, file)
+                image = np.load(filename, allow_pickle=True)
+                return image
+
+    def get_transformed_size(self):
+        image_ = self.load_sample()
+        image_ = self.transform_image(image_)
+        return image_.shape
 
     def update(self, key):
-        if key in self.cache:
-            return self.cache[key]
-        else:
-            filename = os.path.join(self.path, str(key).zfill(self.leading_zeros) + '.npy')
-            image = np.load(filename, allow_pickle=True)
-            image = self.transform_image(image) if self.transform else image
-            image = self.normalize_image(image) if self.normalize else image
-            image = torch.tensor(image).to(torch.float)
-            self.cache[key] = image
-            return image
+        if not isinstance(key, Iterable):
+            key = [key]
+        # move into update.
+        for i in key:
+            # check if key not already in.
+            if not self.cache_lookup[i]:
+                filename = os.path.join(self.path, str(i).zfill(self.leading_zeros) + '.npy')
+                image = np.load(filename, allow_pickle=True)
+                image = self.transform_image(image) if self.transform else image
+                image = self.normalize_image(image) if self.normalize else image
+                self.cache[i] = torch.from_numpy(image).cuda()
+                self.cache_lookup[i] = True
+                self.cache_counter += 1
 
     def transform_image(self, image):
         """
@@ -192,10 +215,9 @@ class ImageCache:
     def loaded_images(self):
         print('Loading images ...')
         items = [int(file.split('.')[0]) for file in os.listdir(self.path) if file.endswith('.npy')]
-        images = torch.stack([self.update(item) for item in items])
-        return images
-    
-    
+        self.update(items)
+        return self.cache
+
     def zscore_images(self, update_stats=True):
         """
         zscore images in cache
@@ -203,9 +225,8 @@ class ImageCache:
         images   = self.loaded_images
         img_mean = images.mean()
         img_std  = images.std()
-        
-        for key in self.cache:
-            self.cache[key] = (self.cache[key] - img_mean) / img_std
+
+        self.cache = (self.cache - img_mean) / img_std
         
         if update_stats:
             self.img_mean = np.float32(img_mean.item())
@@ -242,6 +263,7 @@ class CachedTensorDataset(utils.Dataset):
         self.prev_img = prev_img
         self.trial_id = trial_id
 
+    @torch.no_grad()
     def __getitem__(self, index):
         """
         retrieves the inputs (= tensors[0]) from the image cache. If the image ID is not present in the cache,
@@ -249,13 +271,12 @@ class CachedTensorDataset(utils.Dataset):
 
         Also has the functionality to include the previous image. In that case, len(tensors) will be 3
         """
-
         if len(self.tensors) == 2:
             if type(index) == int:
                 key = self.tensors[0][index].item()
             else:
                 key = self.tensors[0][index].numpy().astype(np.int64)
-            tensors_expanded = [tensor[index] if pos != self.input_position else torch.stack(list(self.image_cache[key]))
+            tensors_expanded = [tensor[index] if pos != self.input_position else self.image_cache[[key]]
                             for pos, tensor in enumerate(self.tensors)]
 
         elif len(self.tensors) > 2:
@@ -268,18 +289,20 @@ class CachedTensorDataset(utils.Dataset):
                 if self.prev_img:
                     key_prev_img = self.tensors[1][index].numpy().astype(np.int64)
 
-            img = torch.stack(list(self.image_cache[key_img]))
-            if self.prev_img:
-                prev_img = torch.stack(list(self.image_cache[key_prev_img]))
-
             if len(self.tensors) == 3:
                 if self.trial_id:
                     trial_id = self.tensors[1][index]
+                    img = self.image_cache[key_img]
                     trial_id_img = torch.ones_like(img).to(img.dtype)*trial_id
+                    full_img = torch.cat([img, img_channel_2], dim=1) if len(img.shape) > 3 else torch.cat([img, img_channel_2], dim=0)
+                else:
+                    if not isinstance(key_img, int):
+                        key_img = key_img.item()
+                        key_prev_img = key_prev_img.item()
 
-                img_channel_2 = prev_img if self.prev_img else trial_id_img
+
+                    full_img = self.image_cache[[key_img,key_prev_img]]
                 targets = self.tensors[2][index]
-                full_img = torch.cat([img, img_channel_2], dim=1) if len(img.shape) > 3 else torch.cat([img, img_channel_2], dim=0)
             else:
                 trial_id = self.tensors[2][index]
                 targets = self.tensors[3][index]
@@ -332,12 +355,20 @@ def get_cached_loader(*args,
     if len(args) > 2 and "eye_position" in names:
         eye_position = torch.tensor(args[2]).to(torch.float)
         tensors.append(eye_position)
-    dataset = CachedTensorDataset(*tensors, image_cache=image_cache, names=names,prev_img=include_prev_image, trial_id=include_trial_id, )
+
+    dataset = CachedTensorDataset(*tensors,
+                                  image_cache=image_cache,
+                                  names=names,
+                                  prev_img=include_prev_image,
+                                  trial_id=include_trial_id,
+                                  )
+
     sampler = RepeatsBatchSampler(repeat_condition) if repeat_condition is not None else None
 
-    dataloader = utils.DataLoader(dataset, batch_sampler=sampler) if batch_size is None else utils.DataLoader(dataset,
+    dataloader = utils.DataLoader(dataset, batch_sampler=sampler, num_workers=0) if batch_size is None else utils.DataLoader(dataset,
                                                                                                             batch_size=batch_size,
                                                                                                             shuffle=shuffle,
+                                                                                                            num_workers=0,
                                                                                                             )
     return dataloader
 
