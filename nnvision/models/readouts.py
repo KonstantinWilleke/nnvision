@@ -2,13 +2,36 @@ import torch
 from torch import nn
 from einops import rearrange
 
+from typing import (
+    Any,
+    List,
+    Dict,
+    Optional,
+    Mapping,
+)
+
 from torch import nn
 from neuralpredictors.utils import get_module_output
 from torch.nn import Parameter
-from neuralpredictors.layers.readouts import PointPooled2d, FullGaussian2d, SpatialXFeatureLinear, RemappedGaussian2d, AttentionReadout
+
+from neuralpredictors.layers.readouts import (
+    PointPooled2d, 
+    FullGaussian2d, 
+    SpatialXFeatureLinear, 
+    RemappedGaussian2d, 
+    AttentionReadout,
+)
+
 from neuralpredictors.layers.legacy import Gaussian2d
-from neuralpredictors.layers.attention_readout import Attention2d, MultiHeadAttention2d, SharedMultiHeadAttention2d
+
+from neuralpredictors.layers.attention_readout import (
+    Attention2d, 
+    MultiHeadAttention2d, 
+    SharedMultiHeadAttention2d,
+)
+
 from neuralpredictors.utils import PositionalEncoding2D
+
 
 class MultiReadout:
     def forward(self, *args, data_key=None, **kwargs):
@@ -530,3 +553,194 @@ class MultipleDense(MultiReadout, torch.nn.ModuleDict):
                 ),
             )
         self.gamma_readout = gamma_readout
+        
+
+class FullGaussian2dJointReadout(FullGaussian2d):
+    def __init__(
+        self, 
+        state_dict_session: Optional[Dict[str, Any]] = None,
+        readout_split: str = "first",
+        requires_grad_1: bool = True,
+        requires_grad_2: bool = True,
+        fields_to_initialize: List[str] = ["_features", "_mu", "_sigma", "bias"],
+        init_features_zeros: bool = False,
+        **kwargs,
+    ) -> None:
+        super().__init__(**kwargs)
+        
+        existing_features = self._features.data
+        device = str(existing_features.device)
+        
+        self.has_pretrained = state_dict_session is not None
+        
+        if '_features' not in fields_to_initialize:
+            if init_features_zeros:
+                self._features.data = torch.zeros_like(
+                    existing_features, device=device
+                )
+            self._features.requires_grad = (
+                requires_grad_1 or requires_grad_2
+            )
+            if not self.has_pretrained:
+                return
+        
+        num_channels_readout = existing_features.shape[1]
+        
+        fields_data = {
+            field: value for field, value in state_dict_session.items()
+            if field in fields_to_initialize
+        }
+        
+        for field in fields_data:
+            if field == "_features":
+                num_channels_pretrained = fields_data[field].shape[1] 
+                if readout_split == "first":
+                    second = existing_features[:, num_channels_pretrained:, ...]
+                    second = torch.zeros_like(second) if init_features_zeros else second
+                    self._features_1 = nn.Parameter(
+                        data=fields_data[field].to(device),
+                        requires_grad=requires_grad_1,
+                    )
+                    self._features_2 = nn.Parameter(
+                        data=second.to(device),
+                        requires_grad=requires_grad_2,
+                    )
+                elif readout_split == "second":
+                    first = existing_features[
+                        :, :(num_channels_readout - num_channels_pretrained), ...
+                    ]
+                    first = torch.zeros_like(first) if init_features_zeros else first
+                    self._features_1 = nn.Parameter(
+                        data=first.to(device),
+                        requires_grad=requires_grad_1,
+                    )
+                    self._features_2 = nn.Parameter(
+                        data=fields_data[field].to(device),
+                        requires_grad=requires_grad_2,
+                    )
+                else:
+                    raise ValueError(
+                        f'readout_split must be "first" or "second"'
+                )
+                continue
+            
+            if field in dir(self):
+                getattr(self, field).data = fields_data[field]
+
+    def _return_features(self, features):
+        if self._shared_features:
+            return self.scales * features[..., self.feature_sharing_index]
+        return features
+        
+    @property
+    def features(self):
+        if not self.has_pretrained:
+            return self._return_features(self._features)  
+        return self._return_features(
+            torch.cat([self._features_1, self._features_2], dim=1)
+        )
+    
+    def feature_l1(self, average=True):
+        """
+        Returns the l1 regularization term either the mean or the sum of all weights
+        Args:
+            average(bool): if True, use mean of weights for regularization
+        """
+        if self._original_features:
+            if average:
+                return self.features.abs().mean()
+            else:
+                return self.features.abs().sum()
+        else:
+            return 0
+
+
+class MultipleFullGaussian2dJointReadout(MultiReadout, torch.nn.ModuleDict):
+    
+    def __init__(
+        self, 
+        core: nn.Module, 
+        in_shape_dict: Dict[str, Any], 
+        n_neurons_dict: Dict[str, Any],
+        state_dict: Optional[Dict[str, Any]],
+        readout_split: str,
+        requires_grad_1: bool,
+        requires_grad_2: bool,
+        fields_to_initialize: List[str],
+        init_features_zeros: bool,
+        init_mu_range: float, 
+        init_sigma: float, 
+        bias: bool, 
+        gamma_readout: float,    
+        gauss_type: str, 
+        grid_mean_predictor: Optional[Any], 
+        grid_mean_predictor_type: Optional[str], 
+        source_grids: Optional[Any],
+        share_features: Optional[bool], 
+        share_grid: Optional[bool], 
+        shared_match_ids: Optional[Dict[str, Any]], 
+        gamma_grid_dispersion: float = 0,
+    ) -> None:
+        
+        # super init to get the _module attribute
+        super().__init__()
+        
+        k0 = None
+        for i, k in enumerate(n_neurons_dict):
+            k0 = k0 or k
+            in_shape = get_module_output(core, in_shape_dict[k])[1:]
+            n_neurons = n_neurons_dict[k]
+
+            source_grid = None
+            shared_grid = None
+            if grid_mean_predictor is not None:
+                if grid_mean_predictor_type == 'cortex':
+                    source_grid = source_grids[k]
+                else:
+                    raise KeyError('grid mean predictor {} does not exist'.format(grid_mean_predictor_type))
+            elif share_grid:
+                shared_grid = {
+                    'match_ids': shared_match_ids[k],
+                    'shared_grid': None if i == 0 else self[k0].shared_grid
+                }
+
+            if share_features:
+                shared_features = {
+                    'match_ids': shared_match_ids[k],
+                    'shared_features': None if i == 0 else self[k0].shared_features
+                }
+            else:
+                shared_features = None
+            
+            state_dict_key = state_dict[k] if state_dict else None
+            
+            self.add_module(
+                k, 
+                FullGaussian2dJointReadout(
+                    state_dict_key,
+                    readout_split,
+                    requires_grad_1,
+                    requires_grad_2,
+                    fields_to_initialize,
+                    init_features_zeros,
+                    in_shape=in_shape,
+                    outdims=n_neurons,
+                    init_mu_range=init_mu_range,
+                    init_sigma=init_sigma,
+                    bias=bias,
+                    gauss_type=gauss_type,
+                    grid_mean_predictor=grid_mean_predictor,
+                    shared_features=shared_features,
+                    shared_grid=shared_grid,
+                    source_grid=source_grid
+                )
+            )
+        self.gamma_readout = gamma_readout
+        self.gamma_grid_dispersion = gamma_grid_dispersion
+
+    def regularizer(self, data_key):
+        if hasattr(FullGaussian2d, 'mu_dispersion'):
+            return self[data_key].feature_l1(average=False) * self.gamma_readout \
+                   + self[data_key].mu_dispersion * self.gamma_grid_dispersion
+        else:
+            return self[data_key].feature_l1(average=False) * self.gamma_readout

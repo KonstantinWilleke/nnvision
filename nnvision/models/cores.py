@@ -269,7 +269,6 @@ class SE2dCore(Core2d, nn.Module):
         return len(self.features) * self.hidden_channels
 
 
-
 class TaskDrivenCore3(Core2d, nn.Module):
     def __init__(
             self,
@@ -435,3 +434,24 @@ class TaskDrivenCore3(Core2d, nn.Module):
         if not self.pretrained:
             self.apply(self.init_conv)
         self.put_to_cuda(cuda=cuda)
+
+
+class JointCore(nn.Module):
+    def __init__(self, core_1, core_2):
+        """Concatenates two core outputs
+        """
+        super().__init__()
+        self.core_1 = core_1
+        self.core_2 = core_2
+
+    def forward(self, input_):
+        out_1 = self.core_1(input_)
+        out_2 = self.core_2(input_)
+
+        out = torch.cat([out_1, out_2], dim=1)
+        return out
+
+    def regularizer(self):
+        return (
+            self.core_1.regularizer() + self.core_2.regularizer()
+        )
