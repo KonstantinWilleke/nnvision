@@ -167,6 +167,55 @@ def get_avg_correlations(model, dataloaders, device='cpu', as_dict=False, per_ne
     return correlations
 
 
+def get_avg_correlations_thr(model, dataloaders, device='cpu', as_dict=False, per_neuron=True, threshold=None, **kwargs):
+    
+    if 'test' in dataloaders:
+        dataloaders = dataloaders['test']
+    
+    correlations = {}
+    for data_key, dataloader in dataloaders.items():
+
+        # Get targets and outputs
+        targets, outputs = model_predictions_repeats(
+            dataloader=dataloader, 
+            model=model, 
+            data_key=data_key, 
+            device=device, 
+            broadcast_to_target=True,
+        )
+        
+        # Get explainable variance (between 0 and 1)
+        if threshold is not None:
+            exp_var_frac, _ = compute_FEV(
+                targets=targets, outputs=outputs, return_exp_var=True,
+            )
+        
+        # Get correlation to avg. targets
+        outputs_avg = np.array([out.mean(axis=0) for out in outputs])
+        targets_avg = np.array([t.mean(axis=0) for t in targets])
+        raw_correlations = corr(targets_avg, outputs_avg, axis=0)
+        
+        if threshold is None:
+            correlations[data_key] = raw_correlations
+        else:
+            correlations[data_key] = raw_correlations[exp_var_frac>threshold]
+            
+        # Check for nans
+        if np.any(np.isnan(correlations[data_key])):
+            warnings.warn(
+                '{}% NaNs , NaNs will be set to Zero.'.format(
+                    np.isnan(correlations[data_key]).mean() * 100
+                )
+            )
+        correlations[data_key][np.isnan(correlations[data_key])] = 0
+        
+    if not as_dict:
+        correlations_arr = np.hstack(list(correlations.values()))
+        correlations = correlations_arr if per_neuron else np.mean(correlations_arr)
+    
+    return correlations
+
+
 def get_correlations(model, dataloaders, device='cpu', as_dict=False, per_neuron=True, **kwargs):
     correlations = {}
     with eval_state(model) if not is_ensemble_function(model) else contextlib.nullcontext():
