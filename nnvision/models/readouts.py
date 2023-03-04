@@ -588,11 +588,39 @@ class FullGaussian2dJointReadout(FullGaussian2d):
         
         fields_data = {
             field: value for field, value in state_dict_session.items()
-            if field in fields_to_initialize
         }
         
+        origin_joint_model = False
+        
+        # if _features_1 and _features_2 -> Origin model is a joint model
+        if set(["_features_1", "_features_2"]).issubset(set(fields_data.keys())):
+            num_channels_pretrained = fields_data["_features_1"].shape[1] + fields_data["_features_2"].shape[1]
+            if readout_split == "first":
+                second = existing_features[:, num_channels_pretrained:, ...]
+                second = torch.zeros_like(second) if init_features_zeros else second
+                data_first = torch.cat(
+                    [fields_data["_features_1"], fields_data["_features_2"]], 
+                    dim=1,
+                )
+                self._features_1 = nn.Parameter(
+                    data=data_first.to(device),
+                    requires_grad=requires_grad_1,
+                )
+                self._features_2 = nn.Parameter(
+                    data=second.to(device),
+                    requires_grad=requires_grad_2,
+                )
+            elif readout_split == "second":
+                raise NotImplementedError
+            
+            origin_joint_model = True
+                
+        # Match remaining fields
         for field in fields_data:
-            if field == "_features":
+            if field not in fields_to_initialize:
+                continue
+                
+            if field == "_features" and not origin_joint_model:
                 num_channels_pretrained = fields_data[field].shape[1] 
                 if readout_split == "first":
                     second = existing_features[:, num_channels_pretrained:, ...]
@@ -622,9 +650,8 @@ class FullGaussian2dJointReadout(FullGaussian2d):
                     raise ValueError(
                         f'readout_split must be "first" or "second"'
                 )
-                continue
             
-            if field in dir(self):
+            elif field in dir(self):
                 getattr(self, field).data = fields_data[field]
 
     def _return_features(self, features):
