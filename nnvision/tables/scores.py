@@ -1,7 +1,11 @@
 import datajoint as dj
 from nnfabrik.main import Model, Dataset, Trainer, Seed, Fabrikant
 from .main import Recording
-from ..utility.measures import get_oracles, get_repeats, get_FEV, get_explainable_var, get_correlations, get_poisson_loss, get_avg_correlations, get_predictions, get_targets
+from ..utility.measures import (
+    get_oracles, get_repeats, get_FEV, get_explainable_var, 
+    get_correlations, get_poisson_loss, get_avg_correlations, 
+    get_predictions, get_targets, get_avg_correlations_thr,
+)
 from .from_nnfabrik import TrainedModel, TrainedTransferModel
 from .utility import DataCache, TrainedModelCache, EnsembleModelCache, TransferTrainedModelCache
 from nnfabrik.utility.dj_helpers import CustomSchema
@@ -53,6 +57,18 @@ class CorrelationToAverageScore(ScoringBaseNeuronType):
     measure_attribute = "avg_correlation"
     data_cache = DataCache
     model_cache = TrainedModelCache
+    
+    
+@schema
+class CorrToAvg_thresholded(ScoringBaseNeuronType):
+    trainedmodel_table = TrainedModel
+    unit_table = Recording.Units
+    measure_function = staticmethod(get_avg_correlations_thr)
+    function_kwargs = dict(threshold=0.15, )
+    measure_dataset = "test"
+    measure_attribute = "avg_correlation_thr"
+    data_cache = DataCache
+    model_cache = TrainedModelCache
 
 
 @schema
@@ -64,6 +80,7 @@ class FEVeScore(ScoringBaseNeuronType):
     measure_attribute = "feve"
     data_cache = DataCache
     model_cache = TrainedModelCache
+
 
 @schema
 class FEVe_thresholded(ScoringBaseNeuronType):
