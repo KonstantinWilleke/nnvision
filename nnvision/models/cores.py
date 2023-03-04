@@ -455,3 +455,6 @@ class JointCore(nn.Module):
         return (
             self.core_1.regularizer() + self.core_2.regularizer()
         )
+    
+    def initialize(self):
+        pass
