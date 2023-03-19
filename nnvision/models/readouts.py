@@ -581,8 +581,8 @@ class FullGaussian2dJointReadout(FullGaussian2d):
             self._features.requires_grad = (
                 requires_grad_1 or requires_grad_2
             )
-            if not self.has_pretrained:
-                return
+        if not self.has_pretrained:
+            return
         
         num_channels_readout = existing_features.shape[1]
         
