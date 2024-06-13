@@ -1,5 +1,16 @@
-# nnvision
-Envisioning the biological visual system with deep neural networks.
+### 1. Install the package with Docker
 
-## Version 0.1
-- compatible with nnfabrik and neuralpredictors post release.
+##### Pre-requisites
+- install [**docker**](https://docs.docker.com/get-docker/) and [**docker-compose**](https://docs.docker.com/compose/install/)
+- clone the repo via `git clone -b git clone -b bisc_2024 https://github.com/sinzlab/nnvision.git`
+
+
+### **Start Jupyterlab environment**
+- create a `.env` file, on the basis of the `.env_example` 
+- now you can create the docker container:
+```
+cd nnvision/
+docker-compose run -d -p 10101:8888 notebook_server
+```
+to access the container, type in `localhost:10101` in any browser.
+
