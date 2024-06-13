@@ -14,3 +14,5 @@ docker-compose run -d -p 10101:8888 notebook_server
 ```
 to access the container, type in `localhost:10101` in any browser.
 
+
+Example Notebook for recreating the plots can be found under: [**Example_plots**](notebooks/bisc_2024/plot_examples.ipynb)
